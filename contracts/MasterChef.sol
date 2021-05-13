@@ -48,6 +48,7 @@ contract MasterChef is Ownable {
         uint256 allocPoint;       // How many allocation points assigned to this pool. PORNs to distribute per block.
         uint256 lastRewardBlock;  // Last block number that PORNs distribution occurs.
         uint256 accPornPerShare; // Accumulated PORNs per share, times 1e12. See below.
+        uint16 depositFeeBP;      // Deposit fee in basis points
     }
 
     // The PORN TOKEN!
@@ -56,6 +57,8 @@ contract MasterChef is Ownable {
     SyrupBar public syrup;
     // Dev address.
     address public devaddr;
+    // Deposit Fee address
+    address public feeAddress;
     // PORN tokens created per block.
     uint256 public pornPerBlock;
     // Bonus muliplier for early porn makers.
@@ -75,17 +78,22 @@ contract MasterChef is Ownable {
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amount);
+    event SetFeeAddress(address indexed user, address indexed newAddress);
+    event SetDevAddress(address indexed user, address indexed newAddress);
+    event UpdateEmissionRate(address indexed user, uint256 pornPerBlock);
 
     constructor(
         PornToken _porn,
         SyrupBar _syrup,
         address _devaddr,
+        address _feeAddress,
         uint256 _pornPerBlock,
         uint256 _startBlock
     ) public {
         porn = _porn;
         syrup = _syrup;
         devaddr = _devaddr;
+        feeAddress = _feeAddress;
         pornPerBlock = _pornPerBlock;
         startBlock = _startBlock;
 
@@ -94,7 +102,8 @@ contract MasterChef is Ownable {
             lpToken: _porn,
             allocPoint: 1000,
             lastRewardBlock: startBlock,
-            accPornPerShare: 0
+            accPornPerShare: 0,
+            depositFeeBP: 0
         }));
 
         totalAllocPoint = 1000;
@@ -109,9 +118,15 @@ contract MasterChef is Ownable {
         return poolInfo.length;
     }
 
-    // Add a new lp to the pool. Can only be called by the owner.
-    // XXX DO NOT add the same LP token more than once. Rewards will be messed up if you do.
-    function add(uint256 _allocPoint, IBEP20 _lpToken, bool _withUpdate) public onlyOwner {
+    mapping(IBEP20 => bool) public poolExistence;
+    modifier nonDuplicated(IBEP20 _lpToken) {
+        require(poolExistence[_lpToken] == false, "nonDuplicated: duplicated");
+        _;
+    }
+
+    // Add a new lp to the pool. Can only be called by the owner.   
+    function add(uint256 _allocPoint, IBEP20 _lpToken, uint16 _depositFeeBP, bool _withUpdate) public onlyOwner nonDuplicated(_lpToken) {
+        require(_depositFeeBP <= 10000, "add: invalid deposit fee basis points");
         if (_withUpdate) {
             massUpdatePools();
         }
@@ -121,19 +136,23 @@ contract MasterChef is Ownable {
             lpToken: _lpToken,
             allocPoint: _allocPoint,
             lastRewardBlock: lastRewardBlock,
-            accPornPerShare: 0
+            accPornPerShare: 0,
+            depositFeeBP : _depositFeeBP
         }));
         updateStakingPool();
     }
 
-    // Update the given pool's PORN allocation point. Can only be called by the owner.
-    function set(uint256 _pid, uint256 _allocPoint, bool _withUpdate) public onlyOwner {
+    // Update the given pool's PORN allocation point and deposit fee. Can only be called by the owner.
+    function set(uint256 _pid, uint256 _allocPoint, uint16 _depositFeeBP, bool _withUpdate) public onlyOwner {
+	require(_depositFeeBP <= 10000, "set: invalid deposit fee basis points");
         if (_withUpdate) {
             massUpdatePools();
         }
         uint256 prevAllocPoint = poolInfo[_pid].allocPoint;
+	    uint16 prevDepositFeeBP = poolInfo[_pid].depositFeeBP;
         poolInfo[_pid].allocPoint = _allocPoint;
-        if (prevAllocPoint != _allocPoint) {
+	    poolInfo[_pid].depositFeeBP = _depositFeeBP;
+        if (prevAllocPoint != _allocPoint || prevDepositFeeBP != _depositFeeBP) {
             totalAllocPoint = totalAllocPoint.sub(prevAllocPoint).add(_allocPoint);
             updateStakingPool();
         }
@@ -232,7 +251,13 @@ contract MasterChef is Ownable {
         }
         if (_amount > 0) {
             pool.lpToken.safeTransferFrom(address(msg.sender), address(this), _amount);
-            user.amount = user.amount.add(_amount);
+	    if (pool.depositFeeBP > 0) {
+                uint256 depositFee = _amount.mul(pool.depositFeeBP).div(10000);
+                pool.lpToken.safeTransfer(feeAddress, depositFee);
+                user.amount = user.amount.add(_amount).sub(depositFee);
+            } else {
+                user.amount = user.amount.add(_amount);
+            }
         }
         user.rewardDebt = user.amount.mul(pool.accPornPerShare).div(1e12);
         emit Deposit(msg.sender, _pid, _amount);
@@ -319,5 +344,18 @@ contract MasterChef is Ownable {
     function dev(address _devaddr) public {
         require(msg.sender == devaddr, "dev: wut?");
         devaddr = _devaddr;
+        emit SetDevAddress(msg.sender, _devaddr);
+    }
+    function setFeeAddress(address _feeAddress) public {
+        require(msg.sender == feeAddress, "setFeeAddress: FORBIDDEN");
+        feeAddress = _feeAddress;
+        emit SetFeeAddress(msg.sender, _feeAddress);
+    }
+
+    // Pancake has to add hidden dummy pools inorder to alter the emission, here we make it simple and transparent to all.
+    function updateEmissionRate(uint256 _pornPerBlock) public onlyOwner {
+        massUpdatePools();
+        pornPerBlock = _pornPerBlock;
+        emit UpdateEmissionRate(msg.sender, _pornPerBlock);
     }
 }
